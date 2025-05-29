@@ -14,9 +14,14 @@ import (
 )
 
 func SandBox() {
-
+	// Future Endeavor, the goal is to be able to run the pdf in a sandbox for dynamic analysis.
+	// This will likely take a lot of time to build, and even more to perfect.
+	// But I hope to have a beta in the near future.
 }
 
+// Function for ThreatScoring, currently experimental, doesn't determine whether the javascript is malicious or not.
+// It scores based on how many indicators of javascript are found.
+// I am working to make it have a more accurate scoring system
 func MatchesThreatScore(Path string, TotalMatches uint8) {
 	if TotalMatches == 6 {
 		fmt.Println(Path)
@@ -37,7 +42,7 @@ func MatchesThreatScore(Path string, TotalMatches uint8) {
 }
 
 func LogSave(SuspiciousFiles string) {
-
+	// Coming soon, will allow you to save the scan results to a log file.
 }
 
 // Function Looks for Javascript and sets true for each match it finds
@@ -223,12 +228,11 @@ func main() {
 	var TotalPdfs uint16 = 0            //total pdfs scanned
 	var TotalFiles uint32 = 0           //total files scanned
 	var SuspiciousFiles []string        //List of files with javascript
-	var ScanPath string                 //The string needed for the -path option
+	var ScanPath string                 //The string needed for the path
 
 	//Flags needed for command line options
 	VeryVerboseFlag := flag.Bool("vv", false, "Very Verbose Mode (Prints all files, not just .pdf)")
 	VerboseFlag := flag.Bool("v", false, "Verbose Mode")
-	PathFlag := flag.String("p", ScanPath, "Path to Pdf(s)")
 	ThreatScoreFlag := flag.Bool("ts", false, "Shows threat score for each pdf")
 	HelpFlag := flag.Bool("h", false, "Shows help page")
 
@@ -236,28 +240,38 @@ func main() {
 	flag.Usage = func() {
 
 		//Flag Option strings
-		p_Option := "-p"
+		UsageDisplay := "Usage:"         //Technically not an option, needed to display the Usage: "./JavaDetect [options] <path>" portion
+		OptionDisplay := "---Options---" //Same principle, displays available options
 		ts_Option := "-ts"
 		v_Option := "-v"
 		vv_Option := "-vv"
 		h_Option := "-h"
 
 		//Flag Descriptions
-		p := "Path to Pdf(s)"
+		UsageInfo := "./JavaDetect [options] <path>"
 		ts := "Shows threat score for each pdf"
 		v := "Verbose Mode"
 		vv := "Very Verbose Mode (Prints all files, not just .pdf)"
 		h := "Shows help page"
 
 		//This sets text alignment for the help page
-		fmt.Printf("%-10s %10s\n", p_Option, p)
-		fmt.Printf("%-10s %10s\n", ts_Option, ts)
-		fmt.Printf("%-10s %10s\n", v_Option, v)
-		fmt.Printf("%-10s %10s\n", vv_Option, vv)
-		fmt.Printf("%-10s %10s\n", h_Option, h)
+		fmt.Printf("%-8s %8s\n", UsageDisplay, UsageInfo)
+		fmt.Println()
+		fmt.Println(OptionDisplay)
+		fmt.Println()
+		fmt.Printf("%-8s %8s\n", ts_Option, ts)
+		fmt.Printf("%-8s %8s\n", v_Option, v)
+		fmt.Printf("%-8s %8s\n", vv_Option, vv)
+		fmt.Printf("%-8s %8s\n", h_Option, h)
 	}
 
 	flag.Parse()
+
+	PathArg := flag.Args()
+	if len(PathArg) < 1 {
+		flag.Usage()
+		os.Exit(0)
+	}
 
 	if *HelpFlag {
 		flag.Usage()
@@ -267,11 +281,9 @@ func main() {
 	if *VeryVerboseFlag {
 		*VerboseFlag = true
 	}
-	ScanPath = *PathFlag //need ScanPath for flags and later func
-	if ScanPath == "" {
-		fmt.Print("No path specified. Defaulting to current directory\n\n")
-		ScanPath = "."
-	}
+
+	ScanPath = PathArg[0] //need ScanPath for later func
+
 	if !*VerboseFlag {
 		fmt.Println("Scanning...")
 	}
@@ -328,30 +340,19 @@ func main() {
 		return nil
 	})
 
-	//Shows the result of the scan and accepts the enter button to quit
-	if len(SuspiciousFiles) == 0 {
-		fmt.Println("\nResult: No suspicious files found")
-		fmt.Print("\nClick Enter to quit")
-		UserRead := bufio.NewReader(os.Stdin)
-		input, err := UserRead.ReadString('\n')
-		if err != nil {
-			fmt.Println(err.Error())
-		}
-		if input == "\n" {
-			fmt.Println("Quitting...")
-			os.Exit(0)
-		}
-	}
-
-	//Prints summary
+	//Prints summary and allows user to exit
 	TotalPdfs = TotalSuspect + TotalClean
 	fmt.Println("\n\n----- SUMMARY -----")
 	fmt.Println("Files Scanned:", TotalFiles)
 	fmt.Println("Pdfs Scanned:", TotalPdfs)
-	fmt.Println("Suspicious Pdfs:", TotalSuspect)
-	fmt.Println("Clean Pdfs:", TotalClean)
-	TotalSeconds := time.Since(StartTime)  //Grabs time that has passed
-	FloatSeconds := TotalSeconds.Seconds() //Converts the time passed to seconds, needed for the future calculations to work
+	if len(SuspiciousFiles) == 0 {
+		fmt.Println("No suspicious files found")
+	} else {
+		fmt.Println("Suspicious Pdfs:", TotalSuspect)
+		fmt.Println("Clean Pdfs:", TotalClean)
+	}
+	TotalTime := time.Since(StartTime)  //Grabs time that has passed
+	FloatSeconds := TotalTime.Seconds() //Converts the time passed to seconds, needed for the calculations to work
 	Minutes := int64(FloatSeconds) / 60
 	IntSeconds := int64(FloatSeconds)
 	SecondsRemaining := IntSeconds % 60
@@ -376,6 +377,7 @@ func main() {
 		}
 	}
 
+	//Reads for newline input to quit
 	fmt.Print("\nClick Enter to quit")
 	UserRead := bufio.NewReader(os.Stdin)
 	input, err := UserRead.ReadString('\n')
