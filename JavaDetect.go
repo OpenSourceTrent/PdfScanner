@@ -12,11 +12,27 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 )
+
+// Struct needed for the summary portion
+type PdfInfo struct {
+	FoundUrls       []string
+	FoundJavaScript []string
+	FoundExecutions []string
+}
+
+// Map needed for the summary. Holds the different struct data for each Pdf
+var FullPdfMap = make(map[string]*PdfInfo) //PdfInfo needs to be a pointer for consecutive map writes in the go func()s'
+
+// Needed for the summary
+var TotalNumOfUrls uint16
+var TotalNumOfJavaScript uint16
+var TotalNumOfExecutions uint16
 
 func SandBox() {
 	// Future Endeavor, the goal is to be able to run the pdf in a sandbox for dynamic analysis.
@@ -25,12 +41,15 @@ func SandBox() {
 }
 
 // Decodes any flate strings
-func FlateDecoder(PdfStream []byte) ([]byte, error) {
+func FlateDecoder(PdfStream []byte, VerboseFlag bool) ([]byte, error) {
 	ByteData := bytes.NewReader(PdfStream)
 	DecodedData, err := zlib.NewReader(ByteData)
 	if err != nil {
-		fmt.Println(err.Error())
-		fmt.Println("Continuing...")
+		if VerboseFlag {
+			fmt.Println(err.Error())
+			fmt.Println("Continuing...")
+
+		}
 		return nil, err
 	}
 	defer DecodedData.Close()
@@ -38,30 +57,38 @@ func FlateDecoder(PdfStream []byte) ([]byte, error) {
 	var DataOutput bytes.Buffer
 	_, err = io.Copy(&DataOutput, DecodedData)
 	if err != nil {
-		fmt.Println(err.Error())
-		fmt.Println("Continuing...")
+		if VerboseFlag {
+			fmt.Println(err.Error())
+			fmt.Println("Continuing...")
+		}
 		return nil, err
 	}
 	return DataOutput.Bytes(), err
 }
 
 // Searches for flate streams to pass to the decoder and returns the decoded stream
-func FlateFinder(PdfBytes []byte) (DecodedData string) {
+func FlateFinder(PdfBytes []byte, VerboseFlag bool) (DecodedData string) {
 	var TotalFileData string
 	var ReplaceFlateDecode string
 	FlateLocation := regexp.MustCompile(`(?s)<<.*?/Filter\s*/FlateDecode.*?>>\s*stream\r?\n(.*?)\r?\nendstream`)
 	LocationMatches := FlateLocation.FindAllSubmatch(PdfBytes, -1)
 	if len(LocationMatches) == 0 { // Need so program doesn't fail if no flate string is found
-		fmt.Println("No FlateDecode streams located")
+		if VerboseFlag {
+			fmt.Println("No FlateDecode streams located")
+		}
 		return
 	} else {
-		fmt.Printf("Found %d Flate streams\n", len(LocationMatches))
+		if VerboseFlag {
+			fmt.Printf("Located %d Flate streams\n", len(LocationMatches))
+		}
 		for _, match := range LocationMatches {
 			data := match[1]
-			DecodedFlate, err := FlateDecoder(data) // Stores the passed decoded data
+			DecodedFlate, err := FlateDecoder(data, VerboseFlag) // Stores the passed decoded data
 			if err != nil {
-				fmt.Println(err.Error())
-				fmt.Println("Continuing...")
+				if VerboseFlag {
+					fmt.Println(err.Error())
+					fmt.Println("Continuing...")
+				}
 				continue
 			}
 			TotalFileData += string(DecodedFlate) // Stores all decoded data
@@ -74,89 +101,74 @@ func FlateFinder(PdfBytes []byte) (DecodedData string) {
 
 }
 
-// Function for ThreatScoring, currently experimental, doesn't determine whether the javascript is malicious or not.
-// It scores based on how many indicators of javascript are found.
-// I am working to make it have a more accurate scoring system
-// func MatchesThreatScore(Path string, TotalMatches uint8) {
-// 	if TotalMatches == 6 {
-// 		fmt.Println(Path)
-// 		fmt.Println("Severity: Critical")
-// 	}
-// 	if TotalMatches == 5 {
-// 		fmt.Println(Path)
-// 		fmt.Println("Severity: High")
-// 	}
-// 	if TotalMatches > 2 && TotalMatches < 5 {
-// 		fmt.Println(Path)
-// 		fmt.Println("Severity: Medium")
-// 	}
-// 	if TotalMatches < 2 {
-// 		fmt.Println(Path)
-// 		fmt.Println("Severity: Low")
-// 	}
-// }
-
 // Func for saving everything to a logfile
-func LogSave(SuspiciousFiles []string, TotalSuspect uint16, TotalClean uint16,
-	TotalFiles uint32, StartTime time.Time, FileMatches map[string]int, ThreatScoreFlag bool,
+func LogSave(TotalFiles uint32, TotalPdfs uint16, TotalNumOfUrls uint16,
+	TotalNumOfJavaScript uint16, TotalNumOfExecutions uint16, StartTime time.Time,
 	LogCapture io.Writer) {
 
-	// Prints summary and allows user to exit
-	TotalPdfs := TotalSuspect + TotalClean
-	fmt.Fprintln(LogCapture, "\n\n----- SUMMARY -----")
-	fmt.Fprintln(LogCapture, "Files Scanned:", TotalFiles)
-	fmt.Fprintln(LogCapture, "Pdfs Scanned:", TotalPdfs)
-	if len(SuspiciousFiles) == 0 {
-		fmt.Fprintln(LogCapture, "No suspicious files found")
-	} else {
-		fmt.Fprintln(LogCapture, "Suspicious Pdfs:", TotalSuspect)
-		fmt.Fprintln(LogCapture, "Clean Pdfs:", TotalClean)
-	}
-	TotalTime := time.Since(StartTime)  //Grabs time that has passed
-	FloatSeconds := TotalTime.Seconds() //Converts the time passed to seconds, needed for the calculations to work
+	TotalTime := time.Since(StartTime)  // Grabs time that has passed
+	FloatSeconds := TotalTime.Seconds() // Converts the time passed to seconds, needed for the calculations to work
 	Minutes := int64(FloatSeconds) / 60
 	IntSeconds := int64(FloatSeconds)
 	SecondsRemaining := IntSeconds % 60
-	fmt.Fprintf(LogCapture, "Time: %dm %ds", Minutes, SecondsRemaining)
-	fmt.Fprintln(LogCapture)
+	fmt.Printf("Scan Time: %dm %ds", Minutes, SecondsRemaining)
 
-	// Prints the suspicious pdf and what was found in it
-	fmt.Fprintln(LogCapture, "\n----- Reasons -----")
-	for _, value := range SuspiciousFiles {
-		if strings.HasSuffix(value, ".pdf") {
-			fmt.Fprintln(LogCapture)
+	fmt.Print("\n\n")
+	fmt.Println("* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *")
+	fmt.Println("*                              FOUND                            *")
+	fmt.Println("* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *")
+	fmt.Print("\n\n")
+
+	var Index uint8 = 0
+	for Name, Matches := range FullPdfMap {
+		if Matches.FoundUrls == nil && Matches.FoundExecutions == nil &&
+			Matches.FoundJavaScript == nil {
+			continue
+		} else {
+			fmt.Println("------------------------------ PDF ------------------------------")
+			fmt.Printf("%10s", Name)
+			fmt.Println()
+			fmt.Println()
+
+			if Matches.FoundUrls != nil {
+				fmt.Println("-------- Urls --------")
+				for index, Match := range Matches.FoundUrls {
+					fmt.Print(index+1, ": "+Match)
+					fmt.Println()
+				}
+			}
+			if Matches.FoundJavaScript != nil {
+				fmt.Println("----- JavaScript -----")
+				for index, Match := range Matches.FoundJavaScript {
+					fmt.Print(index+1, ": "+Match)
+					fmt.Println()
+				}
+			}
+			if Matches.FoundExecutions != nil {
+				fmt.Println("----- Executions -----")
+				for index, Match := range Matches.FoundExecutions {
+					fmt.Print(index+1, ": "+Match)
+					fmt.Println()
+				}
+			}
+			fmt.Println()
+			Index++
 		}
-		fmt.Fprintln(LogCapture, value)
 	}
-
-	// Prints threat score for each file
-	// if ThreatScoreFlag {
-	// 	fmt.Fprintln(LogCapture, "\n\n----- Threat Score -----")
-	// 	for File, Matches := range FileMatches {
-	// 		MatchesThreatScore(File, uint8(Matches))
-	// 		fmt.Fprintln(LogCapture)
-	// 	}
-	// }
-
-	// Reads for newline input to quit
-	fmt.Print("\nClick Enter to quit")
-	UserRead := bufio.NewReader(os.Stdin)
-	input, err := UserRead.ReadString('\n')
-	if err != nil {
-		fmt.Println(err.Error())
-	}
-	if input == "\n" {
-		fmt.Println("Quitting...")
-		os.Exit(0)
-	}
+	fmt.Println("\n----- SUMMARY -----")
+	fmt.Println("Files Scanned:", TotalFiles)
+	fmt.Println("Pdfs Scanned:", TotalPdfs)
+	fmt.Println("Urls Found:", TotalNumOfUrls)
+	fmt.Println("JavaScript Found:", TotalNumOfJavaScript)
+	fmt.Println("Executions Found:", TotalNumOfExecutions)
+	fmt.Print("\n\n")
 
 }
 
-func UrlMatcher(FileData string, wg *sync.WaitGroup) {
+func UrlMatcher(FileData string, wg *sync.WaitGroup, VerboseFlag bool, PdfName string) {
 	defer wg.Done() //Needed for go routine sync
-
+	var Continue bool
 	var ParsedUrls []string
-	var UrlRune []rune
 	var HttpMatch string
 	TopLevelDomainList := []string{".org", ".bit", ".eth", ".crypto", ".onion", ".net", ".com", ".int", ".biz", ".bot", ".shop", ".top",
 		".info", ".info", ".site", ".xyz", ".online", ".click", ".live", ".pl", ".br", ".life", ".ru", ".de", "store", ".id", ".club", ".fr", ".tk", ".cf", ".ga"}
@@ -172,110 +184,284 @@ func UrlMatcher(FileData string, wg *sync.WaitGroup) {
 	RedHatUrls := regexp.MustCompile(".*.redhat.com")
 	UbuntuUrls := regexp.MustCompile(".*.ubuntu.com")
 	MicrosoftUrls := regexp.MustCompile(".*.microsoft.com")
+	LinuxKernelArchive := regexp.MustCompile(".*.kernel.org")
+	Suse := regexp.MustCompile(".*.suse.com")
+	VirtualBox := regexp.MustCompile(".*.virtualbox.org")
 
 	//List of all the matches for a clean "for loop", instead of a bunch of "if statements"
-	RegExpMatchesList := []regexp.Regexp{*Http, *EduDomain, *GoogleUrl, *CalibreUrls,
-		*AdobeUrls, *RedHatUrls, *UbuntuUrls, *MicrosoftUrls}
+	RegExpMatchesList := []regexp.Regexp{*EduDomain, *GoogleUrl, *CalibreUrls,
+		*AdobeUrls, *RedHatUrls, *UbuntuUrls, *MicrosoftUrls, *LinuxKernelArchive,
+		*Suse, *VirtualBox}
 
 	//Goes through data and looks for matches
 	for _, Data := range ParsedFileData { //  'continue' it ignores: for websites you aren't concerned about
+		Continue = false
 		for _, RegexpMatch := range RegExpMatchesList {
 			if RegexpMatch.MatchString(Data) {
-				continue
+				Continue = true
 			}
 		}
+		if Continue {
+			continue
+		}
+
 		// Catches everything else that wasn't ignored
-		// **This could prolly be condensed, working to get that done
 		if Http.MatchString(Data) {
 			HttpLocation := strings.Index(Data, "http")
 			for _, Domain := range TopLevelDomainList {
 				DomainLocation := strings.Index(Data, Domain)
 				if DomainLocation != -1 {
-					DomainLocation += len(Domain)
-					for range DomainLocation {
-						if HttpLocation < DomainLocation {
-							UrlRune = append(UrlRune, rune(Data[HttpLocation]))
-							HttpLocation += 1
-						}
-					}
-					HttpMatch = string(UrlRune)
+					Start := HttpLocation
+					End := DomainLocation + 4
+					HttpMatch = Data[Start:End]
 					ParsedUrls = append(ParsedUrls, HttpMatch)
-					UrlRune = nil
+					TotalNumOfUrls++
 				}
 			}
 		}
 
 	}
-	//sorts the list and removes duplicates Urls
+	// Sorts the list and removes duplicate Urls
 	slices.Sort(ParsedUrls)
 	ParsedUrls = slices.Compact(ParsedUrls)
 	if len(ParsedUrls) != 0 {
-		fmt.Println("Found Urls:")
-		for _, Url := range ParsedUrls { // Prints all the leftover Urls
-			fmt.Println(Url)
-		}
+		FullPdfMap[PdfName] = &PdfInfo{FoundUrls: ParsedUrls}
 	}
 
 }
 
-func RegexpMatcher(FileData string, Match string, MatchType int, wg *sync.WaitGroup) {
-	defer wg.Done() //Needed for go routine sync
+func RegexpMatcher(FileData string, Match string, MatchType int, wg *sync.WaitGroup, PdfName string) (JavaScriptMatches []string, ExecutionMatches []string) {
+
 	var MatchRune []rune
-	ParsedFileData := strings.Split(FileData, "\n")
+
 	// Parses out lines so regexp can match the line easier.
+	ParsedFileData := strings.Split(FileData, "\n")
+
 	RegexpMatch := regexp.MustCompile(Match)
 	for _, Data := range ParsedFileData { // Prints matches
 		if RegexpMatch.MatchString(Data) {
 			if MatchType == 1 { // For SuspiciousStrings{}
 				MatchLocation := strings.Index(Data, Match)
 				if MatchLocation != -1 {
-					for range len(Data) - 1 {
+					DataLength := len(Data) // To prevent any ridiculously large JS strings
+					if len(Data) > 50 {
+						DataLength = 49
+					}
+					for range DataLength {
 						if Data[MatchLocation] == '<' {
 							break
 						}
 						MatchRune = append(MatchRune, rune(Data[MatchLocation]))
 						MatchLocation += 1
 					}
-					fmt.Println("Found:", string(MatchRune))
+					JavaScriptMatches = append(JavaScriptMatches, string(MatchRune))
+					TotalNumOfJavaScript++ // Counter for summary
 				}
 				MatchRune = nil
 			} else if MatchType == 2 { // For SuspiciousExecutions{}
-				AreaSizeToDisplay := 10 // Sets how much to print around the match
+				AreaSizeToDisplay := 10 // Sets how much to print in front of the match
 				MatchLocation := strings.Index(Data, Match)
 				if MatchLocation != -1 { // Calculates the area and prints that around the match
-					start := max(0, MatchLocation-AreaSizeToDisplay)
-					end := min(len(Data), MatchLocation+AreaSizeToDisplay)
-					fmt.Println("Found:", Data[start:end])
+					Start := max(0, MatchLocation-AreaSizeToDisplay)
+					End := min(len(Data), MatchLocation+4)
+					ExecutionMatches = append(ExecutionMatches, Data[Start:End])
+					TotalNumOfExecutions++ // Counter for summary
 				}
-
 			}
 		}
-
 	}
+	return JavaScriptMatches, ExecutionMatches
 }
 
 // Function Looks for Javascript and sets true for each match it finds
-func DetectingIOCs(FileData string, wg *sync.WaitGroup) {
+func DetectingIOCs(FileData string, wg *sync.WaitGroup, VerboseFlag bool, PdfName string) {
 	defer wg.Done()
 
-	// If you only want to see data after the match, place match in SuspiciousStrings
+	// Stores the data from the regexp scans and later passes that to the Pdf map
+	var JavaScriptMatches []string
+	var ExecutionMatches []string
+
+	// If you only want to see data after the match, place match in SuspiciousStringsa
 	// If you want to see data in front of and after the match, place match in SuspiciousExecutions
 	SuspiciousStrings := []string{"bUI: false", "/EmbeddedFile",
 		"/EmbeddedFiles", "/JS", "/JavaScript", "/OpenAction"}
-	SuspiciousExecutions := []string{".exe", ".elf", "cmd.exe"}
+	SuspiciousExecutions := []string{".exe", ".elf", ".deb", ".dll", ".sh", "powershell", "bash"}
 
 	// MatchType is for the RegexpMatcher to determine how to parse the matches
 	MatchTypeStrings := 1
 	MatchTypeExecs := 2
 
-	for _, String := range SuspiciousStrings {
-		wg.Add(1)
-		go RegexpMatcher(FileData, String, MatchTypeStrings, wg)
+	var innerwg sync.WaitGroup
+	innerwg.Add(1)
+	go func() {
+		defer innerwg.Done()
+		for _, String := range SuspiciousStrings {
+			JavaScript, _ := RegexpMatcher(FileData, String, MatchTypeStrings, wg, PdfName)
+			JavaScriptMatches = append(JavaScriptMatches, JavaScript...)
+		}
+	}()
+	innerwg.Add(1)
+	go func() {
+		defer innerwg.Done()
+		for _, Execution := range SuspiciousExecutions {
+			_, Execs := RegexpMatcher(FileData, Execution, MatchTypeExecs, wg, PdfName)
+			ExecutionMatches = append(ExecutionMatches, Execs...)
+		}
+	}()
+	innerwg.Wait()
+
+	slices.Sort(JavaScriptMatches)
+	JavaScriptMatches = slices.Compact(JavaScriptMatches)
+	slices.Sort(ExecutionMatches)
+	ExecutionMatches = slices.Compact(ExecutionMatches)
+
+	FullPdfMap[PdfName] = &PdfInfo{FoundJavaScript: JavaScriptMatches, FoundExecutions: ExecutionMatches}
+
+}
+
+// Counts the pdfs in a dir, needed for the scan progress feature
+func PdfCounter(ScanPath string, PdfChan chan int) {
+	var PdfAmount uint32 = 0
+	filepath.Walk(ScanPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			if errors.Is(err, fs.ErrPermission) {
+				// Do nothing
+			} else {
+				fmt.Printf("\nScan monitoring err %q: %v \n", path, err)
+			}
+		}
+		if !info.IsDir() && strings.HasSuffix(info.Name(), ".pdf") {
+			PdfAmount += 1
+		}
+		return nil
+	})
+	PdfChan <- int(PdfAmount)
+}
+
+func ProgramSummaryWindows(StartTime time.Time, TotalFiles uint32, TotalPdfs uint16) {
+	TotalTime := time.Since(StartTime)  // Grabs time that has passed
+	FloatSeconds := TotalTime.Seconds() // Converts the time passed to seconds, needed for the calculations to work
+	Minutes := int64(FloatSeconds) / 60
+	IntSeconds := int64(FloatSeconds)
+	SecondsRemaining := IntSeconds % 60
+
+	fmt.Print("\n\n")
+	fmt.Println("* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *")
+	fmt.Println("*                              FOUND                            *")
+	fmt.Println("* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *")
+	fmt.Print("\n\n")
+
+	var Index uint8 = 0
+	for Name, Matches := range FullPdfMap {
+		if Matches.FoundUrls == nil && Matches.FoundExecutions == nil &&
+			Matches.FoundJavaScript == nil {
+			continue
+		} else {
+			fmt.Println("------------------------------ PDF ------------------------------")
+			fmt.Printf("%10s", Name)
+			fmt.Println()
+			fmt.Println()
+
+			if Matches.FoundUrls != nil {
+				fmt.Println("-------- Urls --------")
+				for index, Match := range Matches.FoundUrls {
+					fmt.Print(index+1, ": "+Match)
+					fmt.Println()
+				}
+			}
+			if Matches.FoundJavaScript != nil {
+				fmt.Println("----- JavaScript -----")
+				for index, Match := range Matches.FoundJavaScript {
+					fmt.Print(index+1, ": "+Match)
+					fmt.Println()
+				}
+			}
+			if Matches.FoundExecutions != nil {
+				fmt.Println("----- Executions -----")
+				for index, Match := range Matches.FoundExecutions {
+					fmt.Print(index+1, ": "+Match)
+					fmt.Println()
+				}
+			}
+			fmt.Println()
+			Index++
+		}
 	}
-	for _, Execution := range SuspiciousExecutions {
-		wg.Add(1)
-		go RegexpMatcher(FileData, Execution, MatchTypeExecs, wg)
+	// Prints summary and exits
+	fmt.Println("\n----- SUMMARY -----")
+	fmt.Println("Files Scanned:", TotalFiles)
+	fmt.Println("Pdfs Scanned:", TotalPdfs)
+	fmt.Println("Urls Found:", TotalNumOfUrls)
+	fmt.Println("JavaScript Found:", TotalNumOfJavaScript)
+	fmt.Println("Executions Found:", TotalNumOfExecutions)
+	fmt.Printf("Scan Time: %dm %ds", Minutes, SecondsRemaining)
+	fmt.Print("\n\n")
+	os.Exit(0)
+}
+
+func ProgramSummaryUnix(StartTime time.Time, TotalFiles uint32, TotalPdfs uint16) {
+	TotalTime := time.Since(StartTime)  // Grabs time that has passed
+	FloatSeconds := TotalTime.Seconds() // Converts the time passed to seconds, needed for the calculations to work
+	Minutes := int64(FloatSeconds) / 60
+	IntSeconds := int64(FloatSeconds)
+	SecondsRemaining := IntSeconds % 60
+
+	fmt.Print("\n\n")
+	fmt.Println("\033[1;38;2;255;51;255m* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *")
+	fmt.Println("*                              FOUND                            *")
+	fmt.Println("* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *\033[0m")
+	fmt.Print("\n\n")
+
+	var Index uint8 = 0
+	for Name, Matches := range FullPdfMap {
+		if Matches.FoundUrls == nil && Matches.FoundExecutions == nil &&
+			Matches.FoundJavaScript == nil {
+			continue
+		} else {
+			fmt.Println("\033[38;2;255;0;0m------------------------------ PDF ------------------------------")
+			fmt.Printf("%10s", Name)
+			fmt.Println("\033[0m")
+			fmt.Println()
+
+			if Matches.FoundUrls != nil {
+				fmt.Println("\033[38;2;0;204;0m-------- Urls --------")
+				for index, Match := range Matches.FoundUrls {
+					fmt.Print(index+1, ": "+Match)
+					fmt.Println()
+				}
+				fmt.Print("\033[0m")
+			}
+			if Matches.FoundJavaScript != nil {
+				fmt.Println("\033[38;2;255;173;17m----- JavaScript -----")
+				for index, Match := range Matches.FoundJavaScript {
+					fmt.Print(index+1, ": "+Match)
+					fmt.Println()
+				}
+				fmt.Print("\033[0m")
+			}
+			if Matches.FoundExecutions != nil {
+				fmt.Println("\033[38;2;0;204;204m----- Executions -----")
+				for index, Match := range Matches.FoundExecutions {
+					fmt.Print(index+1, ": "+Match)
+					fmt.Println()
+				}
+				fmt.Print("\033[0m")
+			}
+			fmt.Println()
+			Index++
+		}
 	}
+
+	// Prints summary and exits
+	fmt.Println("\n----- SUMMARY -----")
+	fmt.Println("Files Scanned:", TotalFiles)
+	fmt.Println("Pdfs Scanned:", TotalPdfs)
+	fmt.Println("Urls Found:", TotalNumOfUrls)
+	fmt.Println("JavaScript Found:", TotalNumOfJavaScript)
+	fmt.Println("Executions Found:", TotalNumOfExecutions)
+	fmt.Printf("Scan Time: %dm %ds", Minutes, SecondsRemaining)
+	fmt.Print("\n\n")
+	os.Exit(0)
 }
 
 func main() {
@@ -283,18 +469,16 @@ func main() {
 	StartTime := time.Now() //Grabs the time when the scan starts
 
 	// Variables for Pdfs
-	FileMatches := make(map[string]int) // Need for threatscore func
-	var SuspiciousFiles []string        // List of files with javascript
-	var TotalSuspect uint16 = 0         // Total suspect pdfs
-	var TotalClean uint16 = 0           // Total clean pdfs
-	var TotalPdfs uint16 = 0            // Total pdfs scanned
-	var TotalFiles uint32 = 0           // Total files scanned
-	var ScanPath string                 // The string needed for the path
+	PdfChan := make(chan int) //  Pdf channel for the PdfCounter func
+	var CurrentPdf uint8 = 0
+	var ScanFinished uint8 = 0
+	var TotalPdfs uint16 = 0  // Total pdfs scanned
+	var TotalFiles uint32 = 0 // Total files scanned
+	var ScanPath string       // The string needed for the path
 
 	// Flags needed for command line options
 	VeryVerboseFlag := flag.Bool("vv", false, "Very Verbose Mode (Prints all files, not just .pdf)")
 	VerboseFlag := flag.Bool("v", false, "Verbose Mode")
-	ThreatScoreFlag := flag.Bool("ts", false, "Shows threat score for each pdf")
 	LogFlag := flag.Bool("l", false, "Logs stdout to a FileByteData")
 	HelpFlag := flag.Bool("h", false, "Shows help page")
 
@@ -304,16 +488,14 @@ func main() {
 		// Flag Option strings
 		UsageDisplay := "Usage:"         // Technically not an option, needed to display the Usage: "./JavaDetect [options] <path>" portion
 		OptionDisplay := "---Options---" // Same principle, displays available options
-		// ts_Option := "-ts"
-		// v_Option := "-v"
+		v_Option := "-v"
 		vv_Option := "-vv"
 		l_Option := "-l"
 		h_Option := "-h"
 
 		// Flag Descriptions
 		UsageInfo := "./JavaDetect [options] <path>"
-		// ts := "Shows threat score for each pdf"
-		// v := "Verbose Mode"
+		v := "Verbose Mode"
 		vv := "Very Verbose Mode (Prints all files, not just .pdf)"
 		l := "Logs stdout"
 		h := "Shows help page"
@@ -323,8 +505,7 @@ func main() {
 		fmt.Println()
 		fmt.Println(OptionDisplay)
 		fmt.Println()
-		// fmt.Printf("%-8s %8s\n", ts_Option, ts)
-		// fmt.Printf("%-8s %8s\n", v_Option, v)
+		fmt.Printf("%-8s %8s\n", v_Option, v)
 		fmt.Printf("%-8s %8s\n", vv_Option, vv)
 		fmt.Printf("%-8s %8s\n", l_Option, l)
 		fmt.Printf("%-8s %8s\n", h_Option, h)
@@ -347,15 +528,31 @@ func main() {
 
 	//Default behavior if no Args or path is given
 	if len(PathArg) < 1 {
-		// PathArg = append(PathArg, "/home/") //**Used for debugging**
-		flag.Usage()
-		os.Exit(0)
+		PathArg = append(PathArg, "/home/terr/Desktop") //**Used for debugging**
+		// flag.Usage()
+		// os.Exit(0)
 	}
 
 	ScanPath = PathArg[0] // Need ScanPath for later func
 
+	// Allows a progress report when hitting enter.
+	// I don't think this is needed when running verbose mode
 	if !*VerboseFlag {
 		fmt.Println("Scanning...")
+		go PdfCounter(ScanPath, PdfChan)
+		PdfCounter := <-PdfChan
+		go func() {
+			for ScanFinished == 0 {
+				Read := bufio.NewReader(os.Stdin)
+				Enter, err := Read.ReadString('\n')
+				if err != nil {
+					fmt.Println(err.Error())
+				}
+				if Enter == "\n" && ScanFinished != 1 {
+					fmt.Printf("Scanning:%d/%d Pdfs", CurrentPdf, PdfCounter)
+				}
+			}
+		}()
 	}
 
 	// Goes through the directory looking for .pdf files
@@ -375,75 +572,35 @@ func main() {
 
 		//Ensures scanned item is not a folder and is of type .pdf
 		if !info.IsDir() && strings.HasSuffix(info.Name(), ".pdf") {
-			// if *VerboseFlag {
-			// 	fmt.Println("Found PDF:", path)
-			// }
+			if *VerboseFlag {
+				fmt.Println("\nFound PDF:", path)
+			}
 			FileByteData, err := os.ReadFile(path)
 			if err != nil {
 				fmt.Println(err.Error())
 			}
+			PdfName := info.Name() // The Pdf's name, non-necessary variable assignment for better readability
+			CurrentPdf += 1
 
-			// Huge pain that is needed to filter out all the data
-			fmt.Println("\n", path)
-			TotalFileData := FlateFinder(FileByteData)
+			// Filters all the flate streams
+			TotalFileData := FlateFinder(FileByteData, *VerboseFlag)
+			// Runs scans against file data
 			if TotalFileData == "" { //Need this first if condition in case there is no Flate to decode
 				wg.Add(1)
-				go UrlMatcher(string(FileByteData), &wg)
+				go UrlMatcher(string(FileByteData), &wg, *VerboseFlag, PdfName)
 				wg.Add(1)
-				go DetectingIOCs(string(FileByteData), &wg)
+				go DetectingIOCs(string(FileByteData), &wg, *VerboseFlag, PdfName)
 			} else {
 				wg.Add(1)
-				go UrlMatcher(TotalFileData, &wg)
+				go UrlMatcher(TotalFileData, &wg, *VerboseFlag, PdfName)
 				wg.Add(1)
-				go DetectingIOCs(TotalFileData, &wg)
+				go DetectingIOCs(TotalFileData, &wg, *VerboseFlag, PdfName)
+
 			}
 			wg.Wait()
-			// ParsedFileData := strings.Split(TotalFileData, "\n")
-			// for _, Data := range ParsedFileData {
-			// 	if len(Data) > 500 {
-			// 		Index := 0
-			// 		Count := 0
-			// 		var ParsedDataString string
-			// 		DataRune := []rune(Data)
-			// 		for range len(Data) {
-			// 			if Count == 200 {
-			// 				ParsedFileData = append(ParsedFileData, ParsedDataString)
-			// 				ParsedDataString = ""
-			// 				Count = 0
-			// 			}
-			// 			ParsedDataString += string(DataRune[Index])
-			// 			Index++
-			// 			Count++
-			// 		}
-			// 		ParsedFileData = append(ParsedFileData, ParsedDataString)
-			// 	}
-			// }
 
-			// Looks for files with javascript indicators and appends them to a list
-
-			// DetectingIOCs(TotalPdfData)
-
-			// if TotalMatches == 0 {
-			// 	TotalClean += 1
-			// }
-			// if TotalMatches > 0 {
-			// 	SuspiciousFiles = append(SuspiciousFiles, path)
-			// 	TotalSuspect += 1
-			// 	MatchWarnings := []string{JavaWarning, JSWarning, AppWarning, AppHexWarning, OpenActionWarning,
-			// 		AAWarning, ThisWarning, ThisHexWarning}
-			// 	Matches := []bool{JavaMatch, JSMatch, AppMatch, AppHexMatch, OpenActionMatch, AAMatch,
-			// 		ThisMatch, ThisHexMatch}
-			// 	WarningIndex := 0
-			// 	for _, MatchValue := range Matches {
-			// 		if MatchValue {
-			// 			SuspiciousFiles = append(SuspiciousFiles, MatchWarnings[WarningIndex])
-			// 		}
-			// 		WarningIndex += 1
-			// 	}
-			// 	FileMatches[path] = int(TotalMatches)
 			TotalPdfs += 1
 		}
-		// 	// }
 		TotalFiles += 1
 		return nil
 	})
@@ -462,57 +619,17 @@ func main() {
 		}
 		defer LogFile.Close()
 		LogCapture := io.MultiWriter(os.Stdout, LogFile)
-		LogSave(SuspiciousFiles, TotalSuspect, TotalClean,
-			TotalFiles, StartTime, FileMatches, *ThreatScoreFlag,
-			LogCapture)
+		LogSave(TotalFiles, TotalPdfs, TotalNumOfUrls,
+			TotalNumOfJavaScript, TotalNumOfExecutions,
+			StartTime, LogCapture)
 
 	}
-
 	// Prints summary and allows user to exit
-	fmt.Println("\n\n----- SUMMARY -----")
-	fmt.Println("Files Scanned:", TotalFiles)
-	fmt.Println("Pdfs Scanned:", TotalPdfs)
-	// if len(SuspiciousFiles) == 0 {
-	// 	fmt.Println("No suspicious files found")
-	// } else {
-	// 	fmt.Println("Suspicious Pdfs:", TotalSuspect)
-	// 	fmt.Println("Clean Pdfs:", TotalClean)
-	// }
-	TotalTime := time.Since(StartTime)  // Grabs time that has passed
-	FloatSeconds := TotalTime.Seconds() // Converts the time passed to seconds, needed for the calculations to work
-	Minutes := int64(FloatSeconds) / 60
-	IntSeconds := int64(FloatSeconds)
-	SecondsRemaining := IntSeconds % 60
-	fmt.Printf("Scan Time: %dm %ds", Minutes, SecondsRemaining)
-	fmt.Println()
+	ScanFinished = 1 // For the scan progress
 
-	// Prints the suspicious pdf and what was found in it
-	// fmt.Println("\n----- Reasons -----")
-	// for _, value := range SuspiciousFiles {
-	// 	if strings.HasSuffix(value, ".pdf") {
-	// 		fmt.Println()
-	// 	}
-	// 	fmt.Println(value)
-	// }
-
-	// Prints threat score for each file
-	// if *ThreatScoreFlag {
-	// 	fmt.Println("\n\n----- Threat Score -----")
-	// 	for File, Matches := range FileMatches {
-	// 		MatchesThreatScore(File, uint8(Matches))
-	// 		fmt.Println()
-	// 	}
-	// }
-
-	// Reads for newline input to quit
-	fmt.Print("\nClick Enter to quit")
-	UserRead := bufio.NewReader(os.Stdin)
-	input, err := UserRead.ReadString('\n')
-	if err != nil {
-		fmt.Println(err.Error())
-	}
-	if input == "\n" {
-		fmt.Println("Quitting...")
-		os.Exit(0)
+	if runtime.GOOS == "windows" {
+		ProgramSummaryWindows(StartTime, TotalFiles, TotalPdfs)
+	} else {
+		ProgramSummaryUnix(StartTime, TotalFiles, TotalPdfs)
 	}
 }
