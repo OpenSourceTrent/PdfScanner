@@ -528,9 +528,9 @@ func main() {
 
 	//Default behavior if no Args or path is given
 	if len(PathArg) < 1 {
-		PathArg = append(PathArg, "/home/terr/Desktop") //**Used for debugging**
-		// flag.Usage()
-		// os.Exit(0)
+		// PathArg = append(PathArg, "/home/") //**Used for debugging**
+		flag.Usage()
+		os.Exit(0)
 	}
 
 	ScanPath = PathArg[0] // Need ScanPath for later func
